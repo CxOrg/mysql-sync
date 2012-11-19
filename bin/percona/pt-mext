@@ -1,0 +1,289 @@
+#!/bin/sh
+
+# This program is part of Percona Toolkit: http://www.percona.com/software/
+# See "COPYRIGHT, LICENSE, AND WARRANTY" at the end of this file for legal
+# notices and disclaimers.
+
+usage() {
+   if [ "${OPT_ERR}" ]; then
+      echo "${OPT_ERR}" >&2
+   fi
+   echo "Usage: pt-mext [OPTIONS] -- COMMAND" >&2
+   echo "For more information, 'man pt-mext' or 'perldoc $0'" >&2
+   exit 1
+}
+
+if [ -z "$1" ]; then
+   usage;
+fi
+
+# ###########################################################################
+# tmpdir package
+# This package is a copy without comments from the original.  The original
+# with comments and its test file can be found in the Bazaar repository at,
+#   lib/bash/tmpdir.sh
+#   t/lib/bash/tmpdir.sh
+# See https://launchpad.net/percona-toolkit for more information.
+# ###########################################################################
+
+
+set -u
+
+PT_TMPDIR=""
+
+mk_tmpdir() {
+   local dir="${1:-""}"
+
+   if [ -n "$dir" ]; then
+      if [ ! -d "$dir" ]; then
+         mkdir "$dir" || die "Cannot make tmpdir $dir"
+      fi
+      PT_TMPDIR="$dir"
+   else
+      local tool="${0##*/}"
+      local pid="$$"
+      PT_TMPDIR=`mktemp -d -t "${tool}.${pid}.XXXXXX"` \
+         || die "Cannot make secure tmpdir"
+   fi
+}
+
+rm_tmpdir() {
+   if [ -n "$PT_TMPDIR" ] && [ -d "$PT_TMPDIR" ]; then
+      rm -rf "$PT_TMPDIR"
+   fi
+   PT_TMPDIR=""
+}
+
+# ###########################################################################
+# End tmpdir package
+# ###########################################################################
+
+mk_tmpdir
+
+FILE="$PT_TMPDIR/mext_temp_file";
+NUM=0;
+REL=0;
+
+# Command-line parsing.
+args=`getopt -u -n mext r "$@"`;
+if [ "$?" = "1" ]; then
+   usage;
+fi
+set -- $args
+for o; do
+   case "$o" in
+      -r)   REL="1"; shift;;
+      --)   shift;   break;;
+   esac
+done
+
+if [ -z "$1" ]; then
+   usage;
+fi
+
+# Split the output on empty lines and put each into a different file; eliminate
+# lines that don't have "real" content.
+$@ | grep -v '+' | grep -v Variable_name | sed 's/|//g' \
+   | while read line; do
+   if [ "$line" = "" ]; then
+      NUM=`expr $NUM + 1`;
+      echo "" > "$FILE$NUM"
+   fi
+   echo "$line" >> "$FILE$NUM"
+done
+
+# Count how many files there are and prepare to format the output
+SPEC="%-33s %13d"
+AWKS=""
+NUM=`ls "$FILE"* | wc -l`;
+# The last file will be empty...
+NUM=`expr $NUM - 3`;
+
+# Join each file with the next file, joining on the first field. Build a printf
+# spec and awk spec at the same time.
+for i in `seq 0 $NUM`; do
+   NEXTFILE=`expr $i + 1`;
+
+   # Sort each file and eliminate empty lines, so 'join' doesn't complain.
+   sort "$FILE$i" | grep . > "$FILE$i.tmp"
+   mv "$FILE$i.tmp" "$FILE$i"
+   sort "$FILE${NEXTFILE}" | grep . > "$FILE${NEXTFILE}.tmp"
+   mv "$FILE${NEXTFILE}.tmp" "$FILE${NEXTFILE}"
+
+   # Join the files together.  This gets slow O(n^2) as we add more files, but
+   # this really shouldn't be performance critical.
+   join "$FILE$i" "$FILE${NEXTFILE}" | grep . > "$FILE"
+
+   # Find the max length of the [numeric only] values in the file so we know how
+   # wide to make the columns
+   MAXLEN=`awk '{print $2}' "$FILE${NEXTFILE}" | grep -v '[^0-9]' | awk '{print length($1)}' | sort -rn | head -n1`
+   mv "$FILE" "$FILE${NEXTFILE}"
+   SPEC="$SPEC %${MAXLEN}d";
+   if [ "$REL" = "1" ]; then
+      AWKS="$AWKS, \$`expr $i + 3` - \$`expr $i + 2`";
+   else
+      AWKS="$AWKS, \$`expr $i + 3`";
+   fi
+done
+
+# Print output
+AWKCMD="printf(\"$SPEC\n\", \$1, \$2$AWKS);";
+awk "{$AWKCMD}" "$FILE`expr $NUM + 1`"
+
+# Remove all temporary files and the tmp dir.
+rm_tmpdir
+
+exit 0
+
+# ############################################################################
+# Documentation
+# ############################################################################
+:<<'DOCUMENTATION'
+=pod
+
+=head1 NAME
+
+pt-mext - Look at many samples of MySQL C<SHOW GLOBAL STATUS> side-by-side.
+
+=head1 SYNOPSIS
+
+Usage: pt-mext [OPTIONS] -- COMMAND
+
+pt-mext columnizes repeated output from a program like mysqladmin extended.
+
+Get output from C<mysqladmin>:
+
+   pt-mext -r -- mysqladmin ext -i10 -c3"
+
+Get output from a file:
+
+   pt-mext -r -- cat mysqladmin-output.txt
+
+=head1 RISKS
+
+The following section is included to inform users about the potential risks,
+whether known or unknown, of using this tool.  The two main categories of risks
+are those created by the nature of the tool (e.g. read-only tools vs. read-write
+tools) and those created by bugs.
+
+pt-mext is a read-only tool.  It should be very low-risk.
+
+At the time of this release, we know of no bugs that could cause serious harm
+to users.
+
+The authoritative source for updated information is always the online issue
+tracking system.  Issues that affect this tool will be marked as such.  You can
+see a list of such issues at the following URL:
+L<http://www.percona.com/bugs/pt-mext>.
+
+See also L<"BUGS"> for more information on filing bugs and getting help.
+
+=head1 DESCRIPTION
+
+pt-mext executes the C<COMMAND> you specify, and reads through the result one
+line at a time.  It places each line into a temporary file.  When it finds a
+blank line, it assumes that a new sample of SHOW GLOBAL STATUS is starting,
+and it creates a new temporary file.  At the end of this process, it has a
+number of temporary files.  It joins the temporary files together side-by-side
+and prints the result.  If the L<"-r"> option is given, it first subtracts
+each sample from the one after it before printing results.
+
+=head1 OPTIONS
+
+=over
+
+=item -r
+
+Relative: subtract each column from the previous column.
+
+=back
+
+=head1 ENVIRONMENT
+
+This tool does not use any environment variables.
+
+=head1 SYSTEM REQUIREMENTS
+
+This tool requires the Bourne shell (F</bin/sh>) and the seq program.
+
+=head1 BUGS
+
+For a list of known bugs, see L<http://www.percona.com/bugs/pt-mext>.
+
+Please report bugs at L<https://bugs.launchpad.net/percona-toolkit>.
+Include the following information in your bug report:
+
+=over
+
+=item * Complete command-line used to run the tool
+
+=item * Tool L<"--version">
+
+=item * MySQL version of all servers involved
+
+=item * Output from the tool including STDERR
+
+=item * Input files (log/dump/config files, etc.)
+
+=back
+
+If possible, include debugging output by running the tool with C<PTDEBUG>;
+see L<"ENVIRONMENT">.
+
+=head1 DOWNLOADING
+
+Visit L<http://www.percona.com/software/percona-toolkit/> to download the
+latest release of Percona Toolkit.  Or, get the latest release from the
+command line:
+
+   wget percona.com/get/percona-toolkit.tar.gz
+
+   wget percona.com/get/percona-toolkit.rpm
+
+   wget percona.com/get/percona-toolkit.deb
+
+You can also get individual tools from the latest release:
+
+   wget percona.com/get/TOOL
+
+Replace C<TOOL> with the name of any tool.
+
+=head1 AUTHORS
+
+Baron Schwartz
+
+=head1 ABOUT PERCONA TOOLKIT
+
+This tool is part of Percona Toolkit, a collection of advanced command-line
+tools developed by Percona for MySQL support and consulting.  Percona Toolkit
+was forked from two projects in June, 2011: Maatkit and Aspersa.  Those
+projects were created by Baron Schwartz and developed primarily by him and
+Daniel Nichter, both of whom are employed by Percona.  Visit
+L<http://www.percona.com/software/> for more software developed by Percona.
+
+=head1 COPYRIGHT, LICENSE, AND WARRANTY
+
+This program is copyright 2010 Baron Schwartz, 2011-2012 Percona Inc.
+Feedback and improvements are welcome.
+
+THIS PROGRAM IS PROVIDED "AS IS" AND WITHOUT ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 2; OR the Perl Artistic License.  On UNIX and similar
+systems, you can issue `man perlgpl' or `man perlartistic' to read these
+licenses.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA  02111-1307  USA.
+
+=head1 VERSION
+
+pt-mext 2.1.6
+
+=cut
+
+DOCUMENTATION

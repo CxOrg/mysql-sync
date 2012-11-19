@@ -9,12 +9,14 @@ Useful in cases where mysqldump generates gigabytes of data
 
 `mysql-sync [source-dsn] [target-dsn]`
 
+dsn being `username:password@hostname:port/database_name`
 
-dsn being username:password@hostname:port/database_name 
+Example: `mysql-sync root:password@localhost:port/source_db root:password@localhost:port/dest_db`
 
 
 If the remote mysql port is not open, tunnel it via SSH i.e 
 `ssh -L 3308:localhost:3306 -o TCPKeepAlive=no -o ServerAliveInterval=15 user@host`
+then `mysql-sync root:password@localhost:3308/voeb root:password@localhost:3306/v`
 
 
 ## What the script does

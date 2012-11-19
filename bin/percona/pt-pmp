@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+
+# This program is part of Percona Toolkit: http://www.percona.com/software/
+# See "COPYRIGHT, LICENSE, AND WARRANTY" at the end of this file for legal
+# notices and disclaimers.
+
+TOOL="pt-pmp"
+
+# ###########################################################################
+# tmpdir package
+# This package is a copy without comments from the original.  The original
+# with comments and its test file can be found in the Bazaar repository at,
+#   lib/bash/tmpdir.sh
+#   t/lib/bash/tmpdir.sh
+# See https://launchpad.net/percona-toolkit for more information.
+# ###########################################################################
+
+
+set -u
+
+PT_TMPDIR=""
+
+mk_tmpdir() {
+   local dir="${1:-""}"
+
+   if [ -n "$dir" ]; then
+      if [ ! -d "$dir" ]; then
+         mkdir "$dir" || die "Cannot make tmpdir $dir"
+      fi
+      PT_TMPDIR="$dir"
+   else
+      local tool="${0##*/}"
+      local pid="$$"
+      PT_TMPDIR=`mktemp -d -t "${tool}.${pid}.XXXXXX"` \
+         || die "Cannot make secure tmpdir"
+   fi
+}
+
+rm_tmpdir() {
+   if [ -n "$PT_TMPDIR" ] && [ -d "$PT_TMPDIR" ]; then
+      rm -rf "$PT_TMPDIR"
+   fi
+   PT_TMPDIR=""
+}
+
+# ###########################################################################
+# End tmpdir package
+# ###########################################################################
+
+set +u
+
+usage() {
+   if [ "${OPT_ERR}" ]; then
+      echo "${OPT_ERR}" >&2
+   fi
+   echo "Usage: pt-pmp [OPTIONS] [FILES]" >&2
+   echo "For more information, 'man pt-pmp' or 'perldoc $0'" >&2
+   exit 1
+}
+
+# Actually does the aggregation.  The arguments are the max number of functions
+# to aggregate, and the files to read.  If maxlen=0, it means infinity.  We have
+# to pass the maxlen argument into this function to make maxlen testable.
+aggregate_stacktrace() {
+   local maxlen=$1;
+   shift
+   awk "
+      BEGIN {
+         s = \"\";
+      }
+      /^Thread/ {
+         if ( s != \"\" ) {
+            print s;
+         }
+         s = \"\";
+         c = 0;
+      }
+      /^\#/ {
+         if ( \$2 ~ /0x/ ) {
+            if ( \$4 ~/void|const/ ) {
+               targ = \$5;
+            }
+            else {
+               targ = \$4;
+            }
+            if ( targ ~ /[<\\(]/ ) {
+               targ = substr(\$0, index(\$0, \" in \") + 4);
+               if ( targ ~ / from / ) {
+                  targ = substr(targ, 1, index(targ, \" from \") - 1);
+               }
+               if ( targ ~ / at / ) {
+                  targ = substr(targ, 1, index(targ, \" at \") - 1);
+               }
+               # Shorten C++ templates, e.g. in t/samples/stacktrace-004.txt
+               while ( targ ~ />::/ ) {
+                  if ( 0 == gsub(/<[^<>]*>/, \"\", targ) ) {
+                     break;
+                  }
+               }
+               # Further shorten argument lists.
+               while ( targ ~ /\\(/ ) {
+                  if ( 0 == gsub(/\\([^()]*\\)/, \"\", targ) ) {
+                     break;
+                  }
+               }
+               # Remove void and const decorators.
+               gsub(/ ?(void|const) ?/, \"\", targ);
+               gsub(/ /, \"\", targ);
+            }
+            else if ( targ ~ /\\?\\?/ && \$2 ~ /[1-9]/ ) {
+               # Substitute ?? by the name of the library.
+               targ = \$NF;
+               while ( targ ~ /\\// ) {
+                  targ = substr(targ, index(targ, \"/\") + 1);
+               }
+               targ = substr(targ, 1, index(targ, \".\") - 1);
+               targ = targ \"::??\";
+            }
+         }
+         else {
+            targ = \$2;
+         }
+         # get rid of long symbol names such as 'pthread_cond_wait@@GLIBC_2.3.2'
+         if ( targ ~ /@@/ ) {
+            fname = substr(targ, 1, index(targ, \"@@\") - 1);
+         }
+         else {
+            fname = targ;
+         }
+         if ( ${maxlen:-0} == 0 || c < ${maxlen:-0} ) {
+            if (s != \"\" ) {
+               s = s \",\" fname;
+            }
+            else {
+               s = fname;
+            }
+         }
+         c++;
+      }
+      END {
+         print s
+      }
+   " "$@" | sort | uniq -c | sort -r -n -k 1,1
+}
+
+# The main program to run.
+main() {
+
+   # Get command-line options
+   for o; do
+      case "${o}" in
+         --)
+            shift; break;
+            ;;
+         --help)
+            usage;
+            ;;
+         -b)
+            shift; OPT_b="${1}"; shift;
+            ;;
+         -i)
+            shift; OPT_i="${1}"; shift;
+            ;;
+         -k)
+            shift; OPT_k="${1}"; shift;
+            ;;
+         -l)
+            shift; OPT_l="${1}"; shift;
+            ;;
+         -p)
+            shift; OPT_p="${1}"; shift;
+            ;;
+         -s)
+            shift; OPT_s="${1}"; shift;
+            ;;
+         -*)
+            OPT_ERR="Unknown option ${o}."
+            usage
+            ;;
+      esac
+   done
+   export OPT_i="${OPT_i:-1}";
+   export OPT_k="${OPT_k:-}";
+   export OPT_l="${OPT_l:-0}";
+   export OPT_b="${OPT_b:-mysqld}";
+   export OPT_p="${OPT_p:-}";
+   export OPT_s="${OPT_s:-0}";
+
+   if [ -z "${1}" ]; then
+      # There's no file to analyze, so we'll make one.
+      if [ -z "${OPT_p}" ]; then
+         OPT_p=$(pidof -s "${OPT_b}" 2>/dev/null);
+         if [ -z "${OPT_p}" ]; then
+            OPT_p=$(pgrep -o -x "${OPT_b}" 2>/dev/null)
+         fi
+         if [ -z "${OPT_p}" ]; then
+            OPT_p=$(ps -eaf | grep "${OPT_b}" | grep -v grep | awk '{print $2}' | head -n1);
+         fi
+      fi
+      date;
+      for x in $(seq 1 $OPT_i); do
+         gdb -ex "set pagination 0" -ex "thread apply all bt" -batch -p $OPT_p >> "${OPT_k:-$PT_TMPDIR/percona-toolkit}"
+         date +'TS %N.%s %F %T' >> "${OPT_k:-$PT_TMPDIR/percona-toolkit}"
+         sleep $OPT_s
+      done
+   fi
+
+   if [ $# -eq 0 ]; then
+      aggregate_stacktrace "${OPT_l}" "${OPT_k:-$PT_TMPDIR/percona-toolkit}"
+   else
+      aggregate_stacktrace "${OPT_l}" "$@"
+   fi
+}
+
+# Execute the program if it was not included from another file.  This makes it
+# possible to include without executing, and thus test.
+if    [ "${0##*/}" = "$TOOL" ] \
+   || [ "${0##*/}" = "bash" -a "$_" = "$0" ]; then
+   mk_tmpdir
+   main "$@"
+   rm_tmpdir
+fi
+
+# ############################################################################
+# Documentation
+# ############################################################################
+:<<'DOCUMENTATION'
+=pod
+
+=head1 NAME
+
+pt-pmp - Aggregate GDB stack traces for a selected program.
+
+=head1 SYNOPSIS
+
+Usage: pt-pmp [OPTIONS] [FILES]
+
+pt-pmp is a poor man's profiler, inspired by L<http://poormansprofiler.org>.
+It can create and summarize full stack traces of processes on Linux.
+Summaries of stack traces can be an invaluable tool for diagnosing what
+a process is waiting for.
+
+=head1 RISKS
+
+The following section is included to inform users about the potential risks,
+whether known or unknown, of using this tool.  The two main categories of risks
+are those created by the nature of the tool (e.g. read-only tools vs. read-write
+tools) and those created by bugs.
+
+pt-pmp is a read-only tool.  However, collecting GDB stacktraces is achieved by
+attaching GDB to the program and printing stack traces from all threads. This
+will freeze the program for some period of time, ranging from a second or so to
+much longer on very busy systems with a lot of memory and many threads in the
+program.  In the tool's default usage as a MySQL profiling tool, this means that
+MySQL will be unresponsive while the tool runs, although if you are using the
+tool to diagnose an unresponsive server, there is really no reason not to do
+this.  In addition to freezing the server, there is also some risk of the server
+crashing or performing badly after GDB detaches from it.
+
+At the time of this release, we know of no bugs that could cause serious harm
+to users.
+
+The authoritative source for updated information is always the online issue
+tracking system.  Issues that affect this tool will be marked as such.  You can
+see a list of such issues at the following URL:
+L<http://www.percona.com/bugs/pt-pmp>.
+
+See also L<"BUGS"> for more information on filing bugs and getting help.
+
+=head1 DESCRIPTION
+
+pt-pmp performs two tasks: it gets a stack trace, and it summarizes the stack
+trace.  If a file is given on the command line, the tool skips the first step
+and just aggregates the file.
+
+To summarize the stack trace, the tool extracts the function name (symbol)
+from each level of the stack, and combines them with commas.  It does this
+for each thread in the output.  Afterwards, it sorts similar threads together
+and counts how many of each one there are, then sorts them most-frequent first.
+
+=head1 OPTIONS
+
+Options must precede files on the command line.
+
+=over
+
+=item -b BINARY
+
+Which binary to trace (default mysqld)
+
+=item -i ITERATIONS
+
+How many traces to gather and aggregate (default 1)
+
+=item -k KEEPFILE
+
+Keep the raw traces in this file after aggregation
+
+=item -l NUMBER
+
+Aggregate only first NUMBER functions; 0=infinity (default 0)
+
+=item -p PID
+
+Process ID of the process to trace; overrides -b
+
+=item -s SLEEPTIME
+
+Number of seconds to sleep between iterations (default 0)
+
+=back
+
+=head1 ENVIRONMENT
+
+This tool does not use any environment variables.
+
+=head1 SYSTEM REQUIREMENTS
+
+This tool requires Bash v3 or newer.  If no backtrace files are given,
+then gdb is also required to create backtraces for the process specified
+on the command line.
+
+=head1 BUGS
+
+For a list of known bugs, see L<http://www.percona.com/bugs/pt-pmp>.
+
+Please report bugs at L<https://bugs.launchpad.net/percona-toolkit>.
+Include the following information in your bug report:
+
+=over
+
+=item * Complete command-line used to run the tool
+
+=item * Tool L<"--version">
+
+=item * MySQL version of all servers involved
+
+=item * Output from the tool including STDERR
+
+=item * Input files (log/dump/config files, etc.)
+
+=back
+
+If possible, include debugging output by running the tool with C<PTDEBUG>;
+see L<"ENVIRONMENT">.
+
+=head1 DOWNLOADING
+
+Visit L<http://www.percona.com/software/percona-toolkit/> to download the
+latest release of Percona Toolkit.  Or, get the latest release from the
+command line:
+
+   wget percona.com/get/percona-toolkit.tar.gz
+
+   wget percona.com/get/percona-toolkit.rpm
+
+   wget percona.com/get/percona-toolkit.deb
+
+You can also get individual tools from the latest release:
+
+   wget percona.com/get/TOOL
+
+Replace C<TOOL> with the name of any tool.
+
+=head1 AUTHORS
+
+Baron Schwartz, based on a script by Domas Mituzas (L<http://poormansprofiler.org/>)
+
+=head1 ABOUT PERCONA TOOLKIT
+
+This tool is part of Percona Toolkit, a collection of advanced command-line
+tools developed by Percona for MySQL support and consulting.  Percona Toolkit
+was forked from two projects in June, 2011: Maatkit and Aspersa.  Those
+projects were created by Baron Schwartz and developed primarily by him and
+Daniel Nichter, both of whom are employed by Percona.  Visit
+L<http://www.percona.com/software/> for more software developed by Percona.
+
+=head1 COPYRIGHT, LICENSE, AND WARRANTY
+
+This program is copyright 2010-2011 Baron Schwartz, 2011-2012 Percona Inc.
+Feedback and improvements are welcome.
+
+THIS PROGRAM IS PROVIDED "AS IS" AND WITHOUT ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 2; OR the Perl Artistic License.  On UNIX and similar
+systems, you can issue `man perlgpl' or `man perlartistic' to read these
+licenses.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA  02111-1307  USA.
+
+=head1 VERSION
+
+pt-pmp 2.1.6
+
+=cut
+
+DOCUMENTATION
