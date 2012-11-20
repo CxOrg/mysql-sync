@@ -51,13 +51,13 @@ function sync($source, $dest)
         $dir = dirname(__FILE__) . DIRECTORY_SEPARATOR . 'percona' . DIRECTORY_SEPARATOR;
         $cmd = $dir . 'pt-table-sync --print --verbose --function MD5 --execute h=' . $source['hostspec'] . ',u=' . $source['username'] . ',p=' . $source['password'] . ',D=' . $source['database'] . ',t=' . $table . ',P=' . $source['port'] . ' h=' . $dest['hostspec'] . ',u=' . $dest['username'] . ',p=' . $dest['password'] . ',D=' . $dest['database'] . ',t=' . $table . ',P=' . $dest['port'];
 
-        echo shell_exec($cmd);
+        echo run_cmd($cmd);
     }
    
     $tables = getTablesOutOfSync($source, $dest);
     if($tables)
     {
-        echo "Tables still out of sync\nCheck for different database encoding";
+        echo "Tables still out of sync\nCheck for different database encoding\nCheck user has the right privileges on mysql";
         print_r($tables);
     }
     else
@@ -385,6 +385,7 @@ function run_cmd($cmd)
     ob_start();
     $ret = shell_exec($cmd);
     ob_clean();
+    ob_end_clean();
 
     return $ret;
 }
