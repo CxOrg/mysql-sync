@@ -1,3 +1,7 @@
+## DEPRECATED 
+
+This project is no longer maintained. 
+
 # mysql-sync
 
 Syncs two mysql databases by only inserting/deleting/updating the necessary records.
