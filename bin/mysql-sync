@@ -102,7 +102,7 @@ function getTablesChecksum($info)
     $ret = array();
     foreach ($tables as $table)
     {
-        $out = run_cmd("mysql $args -e 'checksum table $table;'");
+        $out = run_cmd("mysql $args -e 'checksum table `$table`;'");
         $matches = array();
         preg_match('/\d+/', $out, $matches);
         $ret[$table] = array_pop($matches);
@@ -164,7 +164,7 @@ function getTableDescriptions($info)
     $ret = array();
     foreach ($tables as $table)
     {
-        $ret[$table] = run_cmd("mysql $args -e 'describe $table;'");
+        $ret[$table] = run_cmd("mysql $args -e 'describe `$table`;'");
     }
 
     return $ret;
