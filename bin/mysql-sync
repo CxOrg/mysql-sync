@@ -5,18 +5,25 @@
 /**
  * Usage:
  * Example:
- * mysql-sync root:password@localhost:3308/voeb root:password@localhost:3306/v
+ * mysql-sync root:password@localhost:3308/voeb root:password@localhost:3306/v json|verbose
  */
 
-if(!isset($argv[0]) || !isset($argv[1]))
+
+// print_r($argv);
+
+if(!isset($argv[0]) || !isset($argv[1]) || !isset($argv[2]))
 {
-    echo "Usage: mysql-sync root:password@localhost:port/source_db root:password@localhost:port/dest_db";
+    echo "Usage: mysql-sync root:password@localhost:port/source_db root:password@localhost:port/dest_db verbose";
     exit;
 }
 
-
 $source = parseDSN('dsn://' . $argv[1]);
 $dest = parseDSN('dsn://' . $argv[2]);
+
+$output = 'n';
+
+if(isset($argv[3]) && $argv[3] == 'json') $output = 'j';
+if (isset($argv[3]) && $argv[3] == 'verbose') $output = 'v';
 
 if($source['database'] === $dest['database'])
 {
@@ -32,37 +39,51 @@ checkSchema($source, $dest);
 
 
 // sync
-sync($source, $dest);
+sync($source, $dest, $output);
 
 exit;
 
-function sync($source, $dest)
+function sync($source, $dest, $output)
 {
     $tables = getTablesOutOfSync($source, $dest);
-    if($tables)
-    {
-        echo "Tables out of sync\n";
-        print_r($tables);
-    }
 
-    // sync
+// sync
+    $table_out = array();
     foreach ($tables as $table)
     {
-        $dir = dirname(__FILE__) . DIRECTORY_SEPARATOR . 'percona' . DIRECTORY_SEPARATOR;
-        $cmd = $dir . 'pt-table-sync --print --verbose --function MD5 --execute h=' . $source['hostspec'] . ',u=' . $source['username'] . ',p=' . $source['password'] . ',D=' . $source['database'] . ',t=' . $table . ',P=' . $source['port'] . ' h=' . $dest['hostspec'] . ',u=' . $dest['username'] . ',p=' . $dest['password'] . ',D=' . $dest['database'] . ',t=' . $table . ',P=' . $dest['port'];
 
-        echo run_cmd($cmd);
+	$dir = dirname(__FILE__) . DIRECTORY_SEPARATOR . 'percona' . DIRECTORY_SEPARATOR;
+        $cmd = $dir . 'pt-table-sync --print --verbose --function MD5 --execute h=' . $source['hostspec'] . ',u=' . $source['username'] . ',p=' . $source['password'] . ',D=' . $source['database'] . ',t=' . $table . ',P=' . $source['port'] . ' h=' . $dest['hostspec'] . ',u=' . $dest['username'] . ',p=' . $dest['password'] . ',D=' . $dest['database'] . ',t=' . $table . ',P=' . $dest['port'];
+	
+	$out = run_cmd($cmd);
+
+	preg_match_all('#(INSERT INTO|UPDATE|DELETE FROM|REPLACE)(.*?)\ \/\*#', $out, $rows);
+
+        $table_out['data'][$table] = $rows[0];
+        $table_out['synced'][$table] = $table." (".count($rows[0]).")";
+	if ($output == 'v') {
+		echo "Sync of:".$table." - ";
+		print_r ($table_out['data'][$table]);
+	}
+    
     }
-   
-    $tables = getTablesOutOfSync($source, $dest);
-    if($tables)
-    {
-        echo "Tables still out of sync\nCheck for different database encoding\nCheck user has the right privileges on mysql";
-        print_r($tables);
+    if(isset($table_out['synced']) && ($output == 'v' || $output == 'n')) { 
+	echo "Synced tables - \n";
+	print_r ($table_out['synced']);
     }
-    else
-    {
-        echo "All Tables synced";
+    $table_out['un-synced'] = getTablesOutOfSync($source, $dest);
+    if ($output == 'v' || $output == 'n') {
+	if($table_out['un-synced']){
+		echo "Tables still out of sync\n";
+		print_r($table_out['un-synced']);
+	}else{
+		echo "All Tables synced\n\n";
+	}
+    }
+    if ($output == 'j') {
+        ob_start();
+	echo json_encode($table_out);
+	ob_flush();
     }
 }
 
