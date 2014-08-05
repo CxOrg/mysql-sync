@@ -7,16 +7,18 @@ Useful in cases where mysqldump generates gigabytes of data
 
 ##Usage:
 
-`mysql-sync [source-dsn] [target-dsn]`
+`mysql-sync [source-dsn] [target-dsn] [output-option]`
 
 dsn being `username:password@hostname:port/database_name`
 
-Example: `mysql-sync root:password@localhost:port/source_db root:password@localhost:port/dest_db`
+output-option `verbose outputs all output of INSERTs UPDATEs etc, json provides JSON encoded output for a return value to another script otherwise a minimal table update  output is the resulting output`
+
+Example: `mysql-sync root:password@localhost:port/source_db root:password@localhost:port/dest_db json`
 
 
 If the remote mysql port is not open, tunnel it via SSH i.e 
 `ssh -L 3308:localhost:3306 -o TCPKeepAlive=no -o ServerAliveInterval=15 user@host`
-then `mysql-sync root:password@localhost:3308/voeb root:password@localhost:3306/v`
+then `mysql-sync root:password@localhost:3308/voeb root:password@localhost:3306/v verbose`
 
 
 ## What the script does
