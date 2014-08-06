@@ -8,6 +8,7 @@
  * mysql-sync root:password@localhost:3308/voeb root:password@localhost:3306/v json|verbose
  */
 
+mb_internal_encoding("UTF-8");
 
 // print_r($argv);
 
